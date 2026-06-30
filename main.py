@@ -10,7 +10,7 @@ import instructor  # A clever add-on tool that acts like a manager, making absol
 # CONFIGURATION
 # =====================================================
 
-GROQ_API_KEY = "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"
+GROQ_API_KEY = "YOUR API KEY"
 
 INPUT_FOLDER = "input_cvs"
 OUTPUT_FOLDER = "shortlisted_cvs"
