@@ -1,10 +1,10 @@
-import os  # Helps your code talk to your computer's operating system (used to find files or create new folders).
-import shutil  # A tool for moving and copying files (used to copy the winning CVs into your "shortlisted" folder).
-import pandas as pd  # Organizes data into neat rows and columns (great if you want to export your final CV results into an Excel or CSV spreadsheet).
-from pypdf import PdfReader  # Opens PDF files and rips the raw text out of them so the AI can read it.
-from pydantic import BaseModel, Field  # Creates a strict "blueprint" or rulebook that forces the AI to give us specific data (like exact numbers or specific words).
-from openai import OpenAI  # The main bridge that lets your code talk to AI models over the internet (works for ChatGPT, Groq, or DeepSeek).
-import instructor  # A clever add-on tool that acts like a manager, making absolutely sure the AI outputs our clean Pydantic blueprint data instead of conversational chat.
+import os
+import shutil
+import pandas as pd
+from pypdf import PdfReader
+from pydantic import BaseModel, Field
+from openai import OpenAI
+import instructor
 
 # =====================================================
 # CONFIGURATION
