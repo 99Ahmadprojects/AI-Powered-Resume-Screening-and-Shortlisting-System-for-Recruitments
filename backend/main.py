@@ -70,7 +70,9 @@ def unique_destination(path: Path) -> Path:
             return candidate
         counter += 1
 
-
+@app.get("/")
+async def health_check():
+    return {"status": "Nexus ATS Backend is awake!"}
 @app.post("/api/start-screening")
 async def start_screening(
         files: list[UploadFile],
