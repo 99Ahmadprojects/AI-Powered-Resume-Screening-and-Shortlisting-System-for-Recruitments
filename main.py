@@ -12,23 +12,23 @@ from pathlib import Path
 from typing import Any
 
 
-# Option 1: paste your API key here.
-# Example: GEMINI_API_KEY = "AIza..."
-# Option 2: leave this empty and set an environment variable named GEMINI_API_KEY.
-GEMINI_API_KEY = "Your_Own_API_KEY"
+GEMINI_API_KEY = ""
 
 INPUT_FOLDER = Path("input_cvs")
 SHORTLISTED_FOLDER = Path("shortlisted_cvs")
 REPORT_FILE = Path("screening_results.csv")
 
 MODEL_NAME = "gemini-3.1-flash-lite"
+
+# Keep these aligned with your current Gemini quota.
 REQUESTS_PER_MINUTE = 15
 DEFAULT_MAX_WORKERS = 15
 DAILY_REQUEST_LIMIT = 500
+
 MINIMUM_SCORE = 60
-REQUEST_TIMEOUT_SECONDS = 90
-MAX_OUTPUT_TOKENS = 500
-RETRY_LIMIT = 0
+REQUEST_TIMEOUT_SECONDS = 120
+MAX_OUTPUT_TOKENS = 1200
+RETRY_LIMIT = 2
 
 TARGET_ROLE = "AI / Machine Learning Engineer"
 TARGET_SKILLS = [
@@ -63,6 +63,41 @@ CSV_COLUMNS = [
     "error",
 ]
 
+ATS_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "candidate_name": {"type": "string"},
+        "highest_degree": {"type": "string"},
+        "field_of_study": {"type": "string"},
+        "ai_experience_years": {"type": "number"},
+        "matched_skills": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+        "missing_skills": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+        "ats_score": {"type": "number"},
+        "decision": {
+            "type": "string",
+            "enum": ["SHORTLIST", "REJECT"],
+        },
+        "decision_reason": {"type": "string"},
+    },
+    "required": [
+        "candidate_name",
+        "highest_degree",
+        "field_of_study",
+        "ai_experience_years",
+        "matched_skills",
+        "missing_skills",
+        "ats_score",
+        "decision",
+        "decision_reason",
+    ],
+}
+
 
 def load_env_file() -> None:
     env_path = Path(".env")
@@ -89,55 +124,71 @@ def get_api_key() -> str:
 
     if not api_key:
         raise RuntimeError(
-            "Gemini API key is missing. Put it in GEMINI_API_KEY at the top of "
-            "main.py, or create a .env file containing GEMINI_API_KEY=your_key_here."
+            "Gemini API key is missing. Add GEMINI_API_KEY to a .env file "
+            "or set it as an environment variable."
         )
 
     return api_key
 
 
-def get_max_workers() -> int:
-    value = os.getenv("MAX_WORKERS", str(DEFAULT_MAX_WORKERS)).strip()
+def get_int_setting(name: str, default: int, maximum: int) -> int:
+    value = os.getenv(name, str(default)).strip()
     try:
-        workers = int(value)
+        number = int(value)
     except ValueError:
-        workers = DEFAULT_MAX_WORKERS
+        number = default
 
-    return max(1, min(workers, REQUESTS_PER_MINUTE))
+    return max(1, min(number, maximum))
 
 
 def get_requests_per_minute() -> int:
-    value = os.getenv("REQUESTS_PER_MINUTE", str(REQUESTS_PER_MINUTE)).strip()
-    try:
-        rpm = int(value)
-    except ValueError:
-        rpm = REQUESTS_PER_MINUTE
+    return get_int_setting(
+        "REQUESTS_PER_MINUTE",
+        REQUESTS_PER_MINUTE,
+        REQUESTS_PER_MINUTE,
+    )
 
-    return max(1, min(rpm, REQUESTS_PER_MINUTE))
+
+def get_max_workers() -> int:
+    return get_int_setting(
+        "MAX_WORKERS",
+        DEFAULT_MAX_WORKERS,
+        REQUESTS_PER_MINUTE,
+    )
 
 
 def build_prompt() -> str:
     skills = ", ".join(TARGET_SKILLS)
     return (
-        "ATS screen this PDF resume for role: "
-        f"{TARGET_ROLE}. Target skills: {skills}. "
-        f"Minimum shortlist score: {MINIMUM_SCORE}. "
-        "Use only evidence in the PDF. Return one decision only. "
-        "Return valid compact JSON with keys: candidate_name, highest_degree, "
-        "field_of_study, ai_experience_years, matched_skills, missing_skills, "
-        "ats_score, decision, decision_reason. "
-        "decision must be SHORTLIST or REJECT. Keep decision_reason under 18 words."
+        f"Screen this PDF resume for the role: {TARGET_ROLE}. "
+        f"Target skills: {skills}. "
+        f"Shortlist threshold: {MINIMUM_SCORE}. "
+        "Use only evidence visible in the PDF. "
+        "Score from 0 to 100 based on role match, AI/ML/Data Science experience, "
+        "technical skills, education, field of study, and missing requirements. "
+        "Return one final ATS decision only."
     )
 
 
-def call_gemini_with_pdf(api_key: str, pdf_path: Path) -> dict[str, Any]:
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{MODEL_NAME}:generateContent"
-    )
-
+def build_payload(pdf_path: Path, schema_mode: str) -> dict[str, Any]:
     pdf_data = base64.b64encode(pdf_path.read_bytes()).decode("utf-8")
-    payload = {
+    generation_config: dict[str, Any] = {
+        "temperature": 0,
+        "maxOutputTokens": MAX_OUTPUT_TOKENS,
+    }
+
+    if schema_mode == "camel_schema":
+        generation_config["responseMimeType"] = "application/json"
+        generation_config["responseSchema"] = ATS_RESPONSE_SCHEMA
+    elif schema_mode == "snake_schema":
+        generation_config["response_mime_type"] = "application/json"
+        generation_config["response_schema"] = ATS_RESPONSE_SCHEMA
+    elif schema_mode == "json_only":
+        generation_config["response_mime_type"] = "application/json"
+    else:
+        raise ValueError(f"Unknown schema mode: {schema_mode}")
+
+    return {
         "contents": [
             {
                 "parts": [
@@ -151,16 +202,15 @@ def call_gemini_with_pdf(api_key: str, pdf_path: Path) -> dict[str, Any]:
                 ]
             }
         ],
-        "generationConfig": {
-            "temperature": 0,
-            "response_mime_type": "application/json",
-            "maxOutputTokens": MAX_OUTPUT_TOKENS,
-            "thinkingConfig": {
-                "thinkingBudget": 0,
-            },
-        },
+        "generationConfig": generation_config,
     }
 
+
+def post_json(api_key: str, payload: dict[str, Any]) -> dict[str, Any]:
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{MODEL_NAME}:generateContent"
+    )
     body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
         url,
@@ -172,32 +222,60 @@ def call_gemini_with_pdf(api_key: str, pdf_path: Path) -> dict[str, Any]:
         },
     )
 
-    for attempt in range(RETRY_LIMIT + 1):
-        try:
-            with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
-                response_body = response.read().decode("utf-8")
-            break
-        except urllib.error.HTTPError as exc:
-            error_body = exc.read().decode("utf-8", errors="replace")
-            if exc.code in {429, 500, 502, 503, 504} and attempt < RETRY_LIMIT:
-                retry_after = exc.headers.get("Retry-After")
-                wait_seconds = int(retry_after) if retry_after and retry_after.isdigit() else 2
-                time.sleep(wait_seconds)
-                continue
-            raise RuntimeError(f"Gemini API HTTP {exc.code}: {error_body}") from exc
-        except urllib.error.URLError as exc:
-            if attempt < RETRY_LIMIT:
-                time.sleep(2)
-                continue
-            raise RuntimeError(f"Gemini API connection error: {exc.reason}") from exc
+    with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+        return json.loads(response.read().decode("utf-8"))
 
-    response_json = json.loads(response_body)
+
+def call_gemini_with_pdf(api_key: str, pdf_path: Path) -> dict[str, Any]:
+    last_error = ""
+    schema_modes = ["camel_schema", "snake_schema", "json_only"]
+
+    for attempt in range(RETRY_LIMIT + 1):
+        should_retry = False
+
+        for schema_mode in schema_modes:
+            try:
+                payload = build_payload(pdf_path, schema_mode=schema_mode)
+                response_json = post_json(api_key, payload)
+                return parse_gemini_response(response_json)
+            except urllib.error.HTTPError as exc:
+                error_body = exc.read().decode("utf-8", errors="replace")
+                last_error = f"Gemini API HTTP {exc.code}: {error_body}"
+
+                if exc.code == 400 and schema_mode != schema_modes[-1]:
+                    continue
+
+                if exc.code in {429, 500, 502, 503, 504} and attempt < RETRY_LIMIT:
+                    retry_after = exc.headers.get("Retry-After")
+                    wait_seconds = int(retry_after) if retry_after and retry_after.isdigit() else 2 * (attempt + 1)
+                    time.sleep(wait_seconds)
+                    should_retry = True
+                    break
+
+                raise RuntimeError(last_error) from exc
+
+            except urllib.error.URLError as exc:
+                last_error = f"Gemini API connection error: {exc.reason}"
+                if attempt < RETRY_LIMIT:
+                    time.sleep(2 * (attempt + 1))
+                    should_retry = True
+                    break
+                raise RuntimeError(last_error) from exc
+
+        if should_retry:
+            continue
+        break
+
+    raise RuntimeError(last_error or "Gemini API request failed.")
+
+
+def parse_gemini_response(response_json: dict[str, Any]) -> dict[str, Any]:
     try:
         text = response_json["candidates"][0]["content"]["parts"][0]["text"]
     except (KeyError, IndexError) as exc:
-        raise RuntimeError(f"Unexpected Gemini response: {response_body}") from exc
+        raise RuntimeError(f"Unexpected Gemini response: {json.dumps(response_json)}") from exc
 
-    return extract_json(text)
+    return normalize_candidate_data(extract_json(text))
 
 
 def extract_json(text: str) -> dict[str, Any]:
@@ -208,18 +286,6 @@ def extract_json(text: str) -> dict[str, Any]:
         if not match:
             raise
         return json.loads(match.group(0))
-
-
-def normalize_decision(value: Any, score: float) -> str:
-    decision = str(value or "").strip().upper()
-
-    if decision in {"SHORTLIST", "SHORTLISTED", "YES", "ACCEPT"}:
-        return "SHORTLIST"
-
-    if decision in {"REJECT", "REJECTED", "NO"}:
-        return "REJECT"
-
-    return "SHORTLIST" if score >= MINIMUM_SCORE else "REJECT"
 
 
 def as_float(value: Any, default: float = 0.0) -> float:
@@ -239,6 +305,35 @@ def as_list(value: Any) -> list[str]:
     return []
 
 
+def normalize_decision(value: Any, score: float) -> str:
+    decision = str(value or "").strip().upper()
+
+    if decision in {"SHORTLIST", "SHORTLISTED", "YES", "ACCEPT"}:
+        return "SHORTLIST"
+
+    if decision in {"REJECT", "REJECTED", "NO"}:
+        return "REJECT"
+
+    return "SHORTLIST" if score >= MINIMUM_SCORE else "REJECT"
+
+
+def normalize_candidate_data(data: dict[str, Any]) -> dict[str, Any]:
+    score = max(0.0, min(100.0, as_float(data.get("ats_score"))))
+    decision = normalize_decision(data.get("decision"), score)
+
+    return {
+        "candidate_name": str(data.get("candidate_name", "")).strip(),
+        "highest_degree": str(data.get("highest_degree", "")).strip(),
+        "field_of_study": str(data.get("field_of_study", "")).strip(),
+        "ai_experience_years": as_float(data.get("ai_experience_years")),
+        "matched_skills": as_list(data.get("matched_skills")),
+        "missing_skills": as_list(data.get("missing_skills")),
+        "ats_score": round(score, 2),
+        "decision": decision,
+        "decision_reason": str(data.get("decision_reason", "")).strip(),
+    }
+
+
 def unique_destination(path: Path) -> Path:
     if not path.exists():
         return path
@@ -254,26 +349,24 @@ def unique_destination(path: Path) -> Path:
 def analyze_pdf(api_key: str, pdf_path: Path) -> dict[str, Any]:
     try:
         data = call_gemini_with_pdf(api_key, pdf_path)
-        score = max(0.0, min(100.0, as_float(data.get("ats_score"))))
-        decision = normalize_decision(data.get("decision"), score)
         moved = False
 
-        if decision == "SHORTLIST":
+        if data["decision"] == "SHORTLIST":
             destination = unique_destination(SHORTLISTED_FOLDER / pdf_path.name)
             shutil.move(str(pdf_path), str(destination))
             moved = True
 
         return {
             "file": pdf_path.name,
-            "candidate_name": str(data.get("candidate_name", "")).strip(),
-            "highest_degree": str(data.get("highest_degree", "")).strip(),
-            "field_of_study": str(data.get("field_of_study", "")).strip(),
-            "ai_experience_years": as_float(data.get("ai_experience_years")),
-            "matched_skills": ", ".join(as_list(data.get("matched_skills"))),
-            "missing_skills": ", ".join(as_list(data.get("missing_skills"))),
-            "ats_score": round(score, 2),
-            "decision": decision,
-            "decision_reason": str(data.get("decision_reason", "")).strip(),
+            "candidate_name": data["candidate_name"],
+            "highest_degree": data["highest_degree"],
+            "field_of_study": data["field_of_study"],
+            "ai_experience_years": data["ai_experience_years"],
+            "matched_skills": ", ".join(data["matched_skills"]),
+            "missing_skills": ", ".join(data["missing_skills"]),
+            "ats_score": data["ats_score"],
+            "decision": data["decision"],
+            "decision_reason": data["decision_reason"],
             "moved_to_shortlisted": moved,
             "error": "",
         }
@@ -320,11 +413,7 @@ def chunks(items: list[Path], size: int) -> list[list[Path]]:
     return [items[index:index + size] for index in range(0, len(items), size)]
 
 
-def process_batch(
-    api_key: str,
-    batch: list[Path],
-    workers: int,
-) -> list[dict[str, Any]]:
+def process_batch(api_key: str, batch: list[Path], workers: int) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -367,7 +456,10 @@ def run() -> None:
 
     if len(pdfs) > DAILY_REQUEST_LIMIT:
         pdfs = pdfs[:DAILY_REQUEST_LIMIT]
-        print(f"Daily model limit is {DAILY_REQUEST_LIMIT}. Processing first {DAILY_REQUEST_LIMIT} PDFs only.")
+        print(
+            f"Daily model limit is {DAILY_REQUEST_LIMIT}. "
+            f"Processing first {DAILY_REQUEST_LIMIT} PDFs only."
+        )
 
     requests_per_minute = min(get_requests_per_minute(), len(pdfs))
     workers = min(get_max_workers(), requests_per_minute)
@@ -382,6 +474,7 @@ def run() -> None:
     for batch_number, batch in enumerate(pdf_batches, start=1):
         batch_start = time.time()
         print(f"\nBatch {batch_number}/{len(pdf_batches)}: {len(batch)} PDF(s)")
+
         results.extend(process_batch(api_key, batch, workers))
         write_report(results)
 
