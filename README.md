@@ -137,7 +137,8 @@ This application is built to be deployed using a hybrid architecture: **Render**
 8.  Click **Create Web Service**. Copy the generated URL
     
 
-**Keeping Render Awake (Free Tier):**Render spins down free services after 15 minutes. To prevent this, create a free account on [UptimeRobot](https://uptimerobot.com/). Set up an HTTP(s) monitor pointing to your Render URL (Root /) with a ping interval of **13 minutes**. The backend has a built-in HEAD/GET health-check route specifically designed to accept these pings.
+**Keeping Render Awake (Free Tier):**
+Render spins down free services after 15 minutes. To prevent this, create a free account on [UptimeRobot](https://uptimerobot.com/). Set up an HTTP(s) monitor pointing to your Render URL (Root /) with a ping interval of **13 minutes**. The backend has a built-in HEAD/GET health-check route specifically designed to accept these pings.
 
 ### Deploying the Frontend (Netlify)
 
