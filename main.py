@@ -22,13 +22,13 @@ SHORTLISTED_FOLDER = Path("shortlisted_cvs")
 REPORT_FILE = Path("screening_results.csv")
 
 MODEL_NAME = "gemini-3.1-flash-lite"
-REQUESTS_PER_MINUTE = 15
-DEFAULT_MAX_WORKERS = 15
-DAILY_REQUEST_LIMIT = 500
+REQUESTS_PER_MINUTE = 1000
+DEFAULT_MAX_WORKERS = 100
+DAILY_REQUEST_LIMIT = 50000
 MINIMUM_SCORE = 60
 REQUEST_TIMEOUT_SECONDS = 90
-MAX_OUTPUT_TOKENS = 500
-RETRY_LIMIT = 0
+MAX_OUTPUT_TOKENS = 2000
+RETRY_LIMIT = 3
 
 TARGET_ROLE = "AI / Machine Learning Engineer"
 TARGET_SKILLS = [
@@ -123,9 +123,6 @@ def build_prompt() -> str:
         f"{TARGET_ROLE}. Target skills: {skills}. "
         f"Minimum shortlist score: {MINIMUM_SCORE}. "
         "Use only evidence in the PDF. Return one decision only. "
-        "Return valid compact JSON with keys: candidate_name, highest_degree, "
-        "field_of_study, ai_experience_years, matched_skills, missing_skills, "
-        "ats_score, decision, decision_reason. "
         "decision must be SHORTLIST or REJECT. Keep decision_reason under 18 words."
     )
 
@@ -155,9 +152,37 @@ def call_gemini_with_pdf(api_key: str, pdf_path: Path) -> dict[str, Any]:
             "temperature": 0,
             "response_mime_type": "application/json",
             "maxOutputTokens": MAX_OUTPUT_TOKENS,
-            "thinkingConfig": {
-                "thinkingBudget": 0,
-            },
+            "responseSchema": {
+                "type": "OBJECT",
+                "properties": {
+                    "candidate_name": {"type": "STRING"},
+                    "highest_degree": {"type": "STRING"},
+                    "field_of_study": {"type": "STRING"},
+                    "ai_experience_years": {"type": "NUMBER"},
+                    "matched_skills": {
+                        "type": "ARRAY",
+                        "items": {"type": "STRING"}
+                    },
+                    "missing_skills": {
+                        "type": "ARRAY",
+                        "items": {"type": "STRING"}
+                    },
+                    "ats_score": {"type": "NUMBER"},
+                    "decision": {"type": "STRING"},
+                    "decision_reason": {"type": "STRING"}
+                },
+                "required": [
+                    "candidate_name",
+                    "highest_degree",
+                    "field_of_study",
+                    "ai_experience_years",
+                    "matched_skills",
+                    "missing_skills",
+                    "ats_score",
+                    "decision",
+                    "decision_reason"
+                ]
+            }
         },
     }
 
