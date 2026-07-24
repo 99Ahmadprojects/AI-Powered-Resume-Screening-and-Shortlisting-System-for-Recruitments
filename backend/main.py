@@ -4,65 +4,38 @@ import os
 import shutil
 import sys
 import time
+import zipfile
 from pathlib import Path
-from fastapi import FastAPI, UploadFile, Form, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, UploadFile, Form, HTTPException, BackgroundTasks
+from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import scanner
 
-app = FastAPI(title="AI ATS Server")
+app = FastAPI(title="Nexus AI ATS Server")
 
-# CORS is fully enabled and ready for production
+# Read the Netlify Frontend URL from Render's Environment Variables
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[FRONTEND_URL, "http://localhost:5173"],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
 tasks_db = {}
 BACKEND_DIR = Path(__file__).resolve().parent
-PROJECT_DIR = BACKEND_DIR.parent
 UPLOAD_DIR = BACKEND_DIR / "temp_uploads"
-SHORTLISTED_DIR = PROJECT_DIR / "shortlisted_cvs"
 UPLOAD_DIR.mkdir(exist_ok=True)
-SHORTLISTED_DIR.mkdir(exist_ok=True)
-
-
-def load_env_file() -> None:
-    for env_path in (BACKEND_DIR / ".env", PROJECT_DIR / ".env"):
-        if not env_path.exists():
-            continue
-
-        for line in env_path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-
-            key, value = line.split("=", 1)
-            key = key.strip()
-            value = value.strip().strip('"').strip("'")
-
-            if key and key not in os.environ:
-                os.environ[key] = value
-
-
-def get_api_key() -> str:
-    load_env_file()
-    api_key = os.getenv("GEMINI_API_KEY", "").strip()
-    if not api_key:
-        raise RuntimeError("GEMINI_API_KEY is missing in backend .env.")
-    return api_key
 
 
 def unique_destination(path: Path) -> Path:
     if not path.exists():
         return path
-
     counter = 1
     while True:
         candidate = path.with_name(f"{path.stem}_{counter}{path.suffix}")
@@ -70,53 +43,100 @@ def unique_destination(path: Path) -> Path:
             return candidate
         counter += 1
 
+
 @app.api_route("/", methods=["GET", "HEAD"])
 async def health_check():
-    return {"status": "Nexus ATS Backend is awake!"}
+    return {"status": "Nexus ATS Backend is awake and secure!"}
+
+
 @app.post("/api/start-screening")
 async def start_screening(
         files: list[UploadFile],
         role: str = Form(...),
+        job_description: str = Form(...),
         skills: str = Form(...),
-        min_score: int = Form(...)
+        reject_threshold: int = Form(...),
+        shortlist_threshold: int = Form(...),
+        api_key: str = Form(...)
 ):
-    try:
-        get_api_key()
-    except RuntimeError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if not api_key or not api_key.strip():
+        raise HTTPException(status_code=400, detail="Gemini API Key is required.")
 
     task_id = str(int(time.time() * 1000))
+
+    # Task Isolation: Every batch gets its own secure directory
     task_dir = UPLOAD_DIR / task_id
-    task_dir.mkdir(exist_ok=True)
+    raw_dir = task_dir / "raw_uploads"
+    output_dir = task_dir / "categorized_cvs"
+
+    shortlisted_dir = output_dir / "Shortlisted"
+    review_dir = output_dir / "Manual_Review"
+    rejected_dir = output_dir / "Rejected"
+
+    for d in [raw_dir, shortlisted_dir, review_dir, rejected_dir]:
+        d.mkdir(parents=True, exist_ok=True)
 
     quota = scanner.get_model_quota()
     safe_daily_limit = quota["daily_limit"]
     safe_rpm = quota["rpm"]
     safe_workers = quota["max_workers"]
 
-    saved_files = []
-    process_files = files[:safe_daily_limit]
+    temp_extracted = []
 
-    for file in process_files:
-        file_path = task_dir / file.filename
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        saved_files.append(file_path)
+    for file in files:
+        filename = file.filename.lower()
+        if filename.endswith(".zip"):
+            zip_path = raw_dir / file.filename
+            with open(zip_path, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+            try:
+                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                    for zip_info in zip_ref.infolist():
+                        if zip_info.is_dir(): continue
+                        ext = zip_info.filename.lower()
+                        if ext.endswith(('.pdf', '.docx', '.doc')):
+                            safe_name = Path(zip_info.filename).name
+                            extracted_path = raw_dir / f"{int(time.time() * 100)}_{safe_name}"
+                            with open(extracted_path, "wb") as f_out:
+                                f_out.write(zip_ref.read(zip_info.filename))
+                            temp_extracted.append(extracted_path)
+            except zipfile.BadZipFile:
+                pass
+            zip_path.unlink(missing_ok=True)
+
+        elif filename.endswith(('.pdf', '.docx', '.doc')):
+            file_path = raw_dir / file.filename
+            with open(file_path, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+            temp_extracted.append(file_path)
+
+    process_files = temp_extracted[:safe_daily_limit]
 
     tasks_db[task_id] = {
         "status": "processing",
         "role": role,
+        "job_description": job_description,
         "skills": skills,
-        "min_score": min_score,
+        "reject_threshold": reject_threshold,
+        "shortlist_threshold": shortlist_threshold,
+        "api_key": api_key.strip(),
         "rpm": safe_rpm,
         "max_workers": safe_workers,
-        "files": saved_files,
+        "files": process_files,
         "results": [],
+        "dirs": {
+            "root": task_dir,
+            "output": output_dir,
+            "shortlist": shortlisted_dir,
+            "review": review_dir,
+            "reject": rejected_dir
+        },
         "started_at": time.time(),
     }
+
     return {
         "task_id": task_id,
-        "total_files": len(saved_files),
+        "total_files": len(process_files),
         "rpm": safe_rpm,
         "max_workers": safe_workers,
         "daily_limit": safe_daily_limit,
@@ -130,10 +150,15 @@ async def screen_generator(task_id: str):
         return
 
     files = task["files"]
-    prompt = scanner.build_prompt(task["role"], task["skills"], task["min_score"])
-    batches = scanner.chunks(files, task["rpm"])
-    api_key = get_api_key()
+    api_key = task["api_key"]
+    dirs = task["dirs"]
 
+    prompt = scanner.build_prompt(
+        task["role"], task["job_description"], task["skills"],
+        task["reject_threshold"], task["shortlist_threshold"]
+    )
+
+    batches = scanner.chunks(files, task["rpm"])
     total_files = len(files)
     completed_files = 0
     started_at = time.time()
@@ -144,29 +169,32 @@ async def screen_generator(task_id: str):
         for batch_idx, batch in enumerate(batches):
             batch_start_time = time.time()
             yield f"data: {json.dumps({'type': 'info', 'msg': f'Processing batch {batch_idx + 1} of {len(batches)}...'})}\n\n"
-
             loop = asyncio.get_running_loop()
+
             with ThreadPoolExecutor(max_workers=task["max_workers"]) as executor:
                 futures = [
-                    loop.run_in_executor(executor, scanner.analyze_pdf, api_key, pdf, prompt)
-                    for pdf in batch
+                    loop.run_in_executor(executor, scanner.analyze_pdf, api_key, file_path, prompt)
+                    for file_path in batch
                 ]
-
                 for coro in asyncio.as_completed(futures):
                     result = await coro
+                    source_path = Path(result["source_path"])
+                    decision = result.get("decision")
 
-                    if result.get("decision") == "SHORTLIST":
-                        source_path = Path(result["source_path"])
-                        destination = unique_destination(SHORTLISTED_DIR / source_path.name)
-                        shutil.move(str(source_path), str(destination))
-                        result["shortlisted_path"] = str(destination)
-                        result["moved_to_shortlisted"] = True
+                    # Physically categorize into specific task folders
+                    if decision == "SHORTLIST":
+                        destination = unique_destination(dirs["shortlist"] / source_path.name)
+                    elif decision == "REVIEW":
+                        destination = unique_destination(dirs["review"] / source_path.name)
                     else:
-                        result["shortlisted_path"] = ""
-                        result["moved_to_shortlisted"] = False
+                        destination = unique_destination(dirs["reject"] / source_path.name)
 
+                    shutil.move(str(source_path), str(destination))
+
+                    result["final_path"] = str(destination)
                     result.pop("source_path", None)
                     task["results"].append(result)
+
                     completed_files += 1
                     elapsed = round(time.time() - started_at, 2)
                     yield f"data: {json.dumps({'type': 'progress', 'completed': completed_files, 'total': total_files, 'elapsed': elapsed, 'result': result})}\n\n"
@@ -179,11 +207,12 @@ async def screen_generator(task_id: str):
                     await asyncio.sleep(wait_seconds)
 
         total_elapsed = round(time.time() - started_at, 2)
-        yield f"data: {json.dumps({'type': 'complete', 'results': task['results'], 'elapsed': total_elapsed})}\n\n"
 
-        task_dir = UPLOAD_DIR / task_id
-        if task_dir.exists():
-            shutil.rmtree(task_dir)
+        # FINAL STEP: Create the ZIP archive for the frontend to download
+        zip_base_path = dirs["root"] / f"Nexus_Categorized_CVs_{task_id}"
+        shutil.make_archive(str(zip_base_path), 'zip', str(dirs["output"]))
+
+        yield f"data: {json.dumps({'type': 'complete', 'results': task['results'], 'elapsed': total_elapsed, 'download_id': task_id})}\n\n"
 
     except Exception as e:
         yield f"data: {json.dumps({'type': 'error', 'msg': str(e)})}\n\n"
@@ -192,6 +221,29 @@ async def screen_generator(task_id: str):
 @app.get("/api/stream/{task_id}")
 async def stream_progress(task_id: str):
     return StreamingResponse(screen_generator(task_id), media_type="text/event-stream")
+
+
+def cleanup_directory(directory: Path):
+    """Wait 2 minutes to ensure download completes, then wipe the directory to save disk space."""
+    time.sleep(120)
+    if directory.exists():
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+@app.get("/api/download/{task_id}")
+async def download_results(task_id: str, background_tasks: BackgroundTasks):
+    zip_path = UPLOAD_DIR / task_id / f"Nexus_Categorized_CVs_{task_id}.zip"
+    if not zip_path.exists():
+        raise HTTPException(status_code=404, detail="Archive not found or expired.")
+
+    # SECURITY FIX: Schedule the folder for deletion immediately after the response is sent
+    background_tasks.add_task(cleanup_directory, UPLOAD_DIR / task_id)
+
+    return FileResponse(
+        path=zip_path,
+        filename=f"Nexus_Categorized_CVs.zip",
+        media_type="application/zip"
+    )
 
 
 if __name__ == "__main__":

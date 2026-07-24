@@ -8,6 +8,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, List, Dict
 
+try:
+    import docx
+except ImportError:
+    docx = None
+
 MODEL_NAME = "gemini-3.1-flash-lite"
 MAX_OUTPUT_TOKENS = 1200
 RETRY_LIMIT = 2
@@ -22,7 +27,7 @@ ATS_RESPONSE_SCHEMA = {
         "matched_skills": {"type": "array", "items": {"type": "string"}},
         "missing_skills": {"type": "array", "items": {"type": "string"}},
         "ats_score": {"type": "number"},
-        "decision": {"type": "string", "enum": ["SHORTLIST", "REJECT"]},
+        "decision": {"type": "string", "enum": ["SHORTLIST", "REVIEW", "REJECT"]},
         "decision_reason": {"type": "string"},
     },
     "required": [
@@ -34,10 +39,6 @@ ATS_RESPONSE_SCHEMA = {
 
 
 def get_model_quota(model_name: str = MODEL_NAME) -> dict:
-    """
-    Optimized Quotas: max_workers is set to 4 or 5 to prevent API Burst 429 errors.
-    Smoothly processing 4 at a time is mathematically faster than 15 failing and retrying.
-    """
     quotas = {
         "gemini-1.5-pro": {"rpm": 2, "max_workers": 2, "daily_limit": 50},
         "gemini-1.5-flash": {"rpm": 15, "max_workers": 4, "daily_limit": 1500},
@@ -50,26 +51,49 @@ def get_model_quota(model_name: str = MODEL_NAME) -> dict:
     return {"rpm": 15, "max_workers": 4, "daily_limit": 500}
 
 
-def build_prompt(role: str, skills: str, min_score: int) -> str:
+def build_prompt(role: str, job_description: str, skills: str, reject_threshold: int, shortlist_threshold: int) -> str:
     return (
-        f"Screen this PDF resume for the role: {role}. "
-        f"Target skills: {skills}. "
-        f"Shortlist threshold: {min_score}. "
-        "Use only evidence visible in the PDF. "
-        "Score from 0 to 100 based on role match, experience, "
-        "technical skills, education, field of study, and missing requirements. "
-        "Return one final ATS decision only."
+        f"You are an expert ATS (Applicant Tracking System).\n"
+        f"Role: {role}\n"
+        f"Job Description: {job_description}\n"
+        f"Target Skills: {skills}\n\n"
+        "Instructions:\n"
+        "1. Analyze the provided resume against the Role, Job Description, and Target Skills.\n"
+        "2. Score the candidate from 0 to 100 based on overall match, experience, technical skills, education, and missing requirements.\n"
+        "3. Categorize the candidate based on these EXACT rules. The score directly determines the decision:\n"
+        f"   - REJECT: If the score is strictly less than {reject_threshold}.\n"
+        f"   - REVIEW: If the score is between {reject_threshold} and {shortlist_threshold} inclusive.\n"
+        f"   - SHORTLIST: If the score is strictly greater than {shortlist_threshold}.\n"
+        "4. Provide a detailed 'decision_reason' explaining EXACTLY why they were assigned this category and justify the score.\n"
+        "Return one final ATS decision and score in the specified JSON format."
     )
 
 
-def build_payload(pdf_path: Path, prompt: str) -> dict:
-    # Removed the schema guessing loop for direct, accurate REST JSON configuration.
-    pdf_data = base64.b64encode(pdf_path.read_bytes()).decode("utf-8")
+def build_payload(file_path: Path, prompt: str) -> dict:
+    parts = []
+
+    # Handle direct inline_data for PDF
+    if file_path.suffix.lower() == ".pdf":
+        file_data = base64.b64encode(file_path.read_bytes()).decode("utf-8")
+        parts.append({"inline_data": {"mime_type": "application/pdf", "data": file_data}})
+
+    # Handle text extraction for DOCX/DOC as LLMs require raw text for Word docs via basic API
+    elif file_path.suffix.lower() in [".docx", ".doc"]:
+        if docx is None:
+            raise RuntimeError("python-docx is required. Please install it via requirements.txt")
+        try:
+            doc = docx.Document(file_path)
+            text_content = "\n".join([para.text for para in doc.paragraphs])
+            parts.append({"text": f"--- RESUME CONTENT ---\n{text_content}\n--- END RESUME CONTENT ---"})
+        except Exception as e:
+            raise RuntimeError(f"Failed to read DOCX file {file_path.name}: {str(e)}")
+    else:
+        raise RuntimeError(f"Unsupported file format: {file_path.suffix}")
+
+    parts.append({"text": prompt})
 
     return {
-        "contents": [
-            {"parts": [{"inline_data": {"mime_type": "application/pdf", "data": pdf_data}}, {"text": prompt}]}
-        ],
+        "contents": [{"parts": parts}],
         "generationConfig": {
             "temperature": 0,
             "maxOutputTokens": MAX_OUTPUT_TOKENS,
@@ -90,23 +114,19 @@ def post_json(api_key: str, payload: dict) -> dict:
         return json.loads(response.read().decode("utf-8"))
 
 
-def call_gemini(api_key: str, pdf_path: Path, prompt: str) -> dict:
+def call_gemini(api_key: str, file_path: Path, prompt: str) -> dict:
     import time
     last_error = ""
-
     for attempt in range(RETRY_LIMIT + 1):
         try:
-            payload = build_payload(pdf_path, prompt)
+            payload = build_payload(file_path, prompt)
             response = post_json(api_key, payload)
             text = response["candidates"][0]["content"]["parts"][0]["text"]
             return parse_response(text)
         except urllib.error.HTTPError as exc:
             error_body = exc.read().decode('utf-8', errors='replace')
             last_error = f"HTTP {exc.code}: {error_body}"
-
-            # Smart Retry only on Rate Limits (429) or Server Errors (50x)
             if exc.code in {429, 500, 502, 503, 504} and attempt < RETRY_LIMIT:
-                # Add jitter (randomness) so multiple threads don't retry at the exact same millisecond
                 jitter = random.uniform(0.5, 1.5)
                 time.sleep((2 * (attempt + 1)) + jitter)
                 continue
@@ -117,7 +137,6 @@ def call_gemini(api_key: str, pdf_path: Path, prompt: str) -> dict:
                 time.sleep((2 * (attempt + 1)) + random.uniform(0.5, 1.5))
                 continue
             raise RuntimeError(last_error) from exc
-
     raise RuntimeError(last_error)
 
 
@@ -131,8 +150,10 @@ def parse_response(text: str) -> dict:
 
     score = float(data.get("ats_score", 0))
     decision = str(data.get("decision", "")).upper()
-    if decision not in {"SHORTLIST", "REJECT"}:
-        decision = "SHORTLIST" if score >= 60 else "REJECT"
+
+    # Fallback in case the LLM hallucinates an invalid string
+    if decision not in {"SHORTLIST", "REVIEW", "REJECT"}:
+        decision = "REVIEW"
 
     return {
         "candidate_name": str(data.get("candidate_name", "")).strip(),
@@ -147,12 +168,12 @@ def parse_response(text: str) -> dict:
     }
 
 
-def analyze_pdf(api_key: str, pdf_path: Path, prompt: str) -> dict:
+def analyze_pdf(api_key: str, file_path: Path, prompt: str) -> dict:
     try:
-        data = call_gemini(api_key, pdf_path, prompt)
-        return {"file": pdf_path.name, "source_path": str(pdf_path), "error": "", **data}
+        data = call_gemini(api_key, file_path, prompt)
+        return {"file": file_path.name, "source_path": str(file_path), "error": "", **data}
     except Exception as exc:
-        raise RuntimeError(f"Error processing {pdf_path.name}: {str(exc)}") from exc
+        raise RuntimeError(f"Error processing {file_path.name}: {str(exc)}") from exc
 
 
 def chunks(lst: list, n: int):
