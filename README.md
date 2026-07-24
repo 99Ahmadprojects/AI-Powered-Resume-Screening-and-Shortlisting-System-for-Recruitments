@@ -1,52 +1,82 @@
-🚀 Nexus AI ATS
-===============
+<p align="center">
+  <img src="frontend/public/favicon.png" alt="Nexus ATS Banner" width="200">
+</p>
 
-**Intelligent Agentic Resume Screening**
 
-Nexus AI ATS is an advanced, full-stack Applicant Tracking System powered by Google's Gemini AI. It allows recruiters to upload candidate CVs (PDFs) in bulk, define target roles and required skills, and let an intelligent agent automatically screen, score, and shortlist the best talent.
+# 🚀 Nexus AI ATS Engine
 
-Featuring a stunning dark-mode glassmorphism UI, real-time progress streaming, and intelligent API rate-limit handling, Nexus completely automates the most tedious part of the hiring process.
+An open-source, production-ready, and 100% free **AI-Powered Resume Screening & Shortlisting System**. Built using **FastAPI**, **React**, **Tailwind CSS**, and the **Google Gemini LLM**, Nexus ATS automates candidate evaluation by bulk-parsing CVs, calculating dynamic ATS match scores, and physically organizing files into downloadable categorized archives.
 
-✨ Key Features
---------------
 
-*   **Bulk Document Processing:** Drag and drop dozens of PDF resumes at once.
-    
-*   **Agentic AI Screening:** Uses gemini-3.1-flash-lite (or any configured Gemini model) to evaluate candidates based on education, experience, and matched/missing skills.
-    
-*   **Real-Time SSE Streaming:** Watch the AI analyze CVs live. The frontend receives Server-Sent Events (SSE) to update progress bars and candidate status without page reloads.
-    
-*   **Smart Quota Management:** Automatically detects the API limits of your chosen Gemini model and smoothly orchestrates concurrent processing to avoid 429 Rate Limit errors. Includes a beautiful glowing cooldown timer if the limit is reached.
-    
-*   **Premium UI/UX:** Built with React, Tailwind CSS v4, and Framer Motion for buttery-smooth page transitions, glassmorphism panels, and a premium SaaS aesthetic.
-    
-*   **1-Click Export:** Download the final screening results as a fully formatted .csv report.
-    
 
-🛠️ Tech Stack
---------------
+---
 
-**Frontend:**
+## 🔗 Live Application & Demo
 
-*   React 18 (Vite)
-    
-*   Tailwind CSS v4
-    
-*   Framer Motion (Animations)
-    
-*   Lucide React (Icons)
-    
+* **Live Web App:** [https://nexus-ai-ats.netlify.app/](https://nexus-ai-ats.netlify.app/)
 
-**Backend:**
+---
 
-*   Python 3.13
-    
-*   FastAPI & Uvicorn
-    
-*   Google Gemini API (generativelanguage)
-    
-*   ThreadPoolExecutor for non-blocking concurrent processing
-    
+## ✨ Key Features
+
+* **📦 Multi-Format Bulk Upload:** Process individual resumes (`.pdf`, `.docx`, `.doc`) or entire bulk ZIP archives simultaneously.
+* **🧠 Dynamic Gemini LLM Analysis:** Scores candidates against target roles, custom job descriptions, and required skill matrices.
+* **📁 Physical File Auto-Sorting:** Automatically organizes resumes into `Shortlisted/`, `Manual_Review/`, and `Rejected/` subdirectories on the fly.
+* **⚡ Downloadable ZIP Bundles:** Generates a clean, categorized ZIP package containing sorted candidate files for instant downloading.
+* **🔑 Bring Your Own Key (BYOK) Security:** Zero server-side API cost. Users authenticate locally with their own free Gemini API key stored strictly in `sessionStorage`.
+* **⏱️ Concurrency & Rate-Limit Shield:** Integrated batching engine and ThreadPoolExecutor handle API quotas gracefully without crashing.
+* **📊 Analytics & Export:** Real-time event streaming (`Server-Sent Events`) with 1-click CSV report export.
+* **🔒 Auto-Cleanup Security:** Temporary files and generated archives are automatically wiped from server storage via background tasks after processing.
+
+---
+
+## 🛠️ Tech Stack
+
+### **Frontend**
+* **Framework:** React 19 + Vite
+* **Styling:** Tailwind CSS v4
+* **Animations:** Framer Motion
+* **Icons:** Lucide React
+* **Routing:** React Router DOM v6
+* **Deployment:** Netlify
+
+### **Backend**
+* **Framework:** FastAPI (Python 3.10+)
+* **AI Engine:** Google Gemini Pro (`google-generativeai`)
+* **Document Parsing:** PyPDF2 / `python-docx`
+* **Concurrency:** `asyncio` + `ThreadPoolExecutor`
+* **Server:** Uvicorn
+* **Deployment:** Render
+
+---
+
+## 📁 Repository Structure
+
+```text
+AI-Powered-Resume-Screening-and-Shortlisting-System-for-Recruitments/
+├── frontend/                     # React + Vite Frontend Application
+│   ├── public/                   # Static assets, sitemap, robots.txt, _redirects
+│   │   ├── _redirects            # Netlify SPA routing rules
+│   │   ├── favicon.png           # Custom Nexus Logo
+│   │   ├── robots.txt            # Search engine directives
+│   │   └── sitemap.xml           # SEO Sitemap
+│   ├── src/                      # Source React components
+│   │   ├── App.jsx               # Main SPA routing & UI logic
+│   │   ├── index.css             # Tailwind imports
+│   │   └── main.jsx              # Entry point
+│   ├── index.html                # Pre-rendered HTML + OpenGraph Meta + Schema
+│   ├── package.json              # Frontend dependencies
+│   └── vite.config.js            # Vite bundler configuration
+│
+└── backend/                      # FastAPI Backend Server
+    ├── main.py                   # API routes, SSE streaming, file packaging
+    ├── scanner.py                # Gemini LLM prompt construction & PDF parsing
+    └── requirements.txt          # Python dependencies
+
+```
+
+---
+
 
 💻 Local Installation & Setup
 -----------------------------
