@@ -2,14 +2,13 @@
 
 An open-source, production-ready, and 100% free **AI-Powered Resume Screening & Shortlisting System**. Built using **FastAPI**, **React**, **Tailwind CSS**, and the **Google Gemini LLM**, Nexus ATS automates candidate evaluation by bulk-parsing CVs, calculating dynamic ATS match scores, and physically organizing files into downloadable categorized archives.
 
-![Nexus ATS Banner](frontend/public/favicon.png)
+<img src="frontend/public/favicon.png" alt="Nexus ATS Banner" class="w-5 h-5">
 
 ---
 
 ## 🔗 Live Application & Demo
 
-* **Live Web App:** [https://YOUR-NETLIFY-URL.netlify.app](https://YOUR-NETLIFY-URL.netlify.app)
-* **Backend API Base:** [https://YOUR-RENDER-URL.onrender.com](https://YOUR-RENDER-URL.onrender.com)
+* **Live Web App:** [https://nexus-ai-ats.netlify.app/](https://nexus-ai-ats.netlify.app/)
 
 ---
 
