@@ -13,9 +13,10 @@ try:
 except ImportError:
     docx = None
 
-MODEL_NAME = "gemini-3.1-flash-lite"
+# Using gemini-1.5-flash as it is the fastest and most cost-effective for bulk text/vision tasks
+MODEL_NAME = "gemini-1.5-flash"
 MAX_OUTPUT_TOKENS = 1200
-RETRY_LIMIT = 2
+RETRY_LIMIT = 3
 
 ATS_RESPONSE_SCHEMA = {
     "type": "object",
@@ -37,19 +38,16 @@ ATS_RESPONSE_SCHEMA = {
     ],
 }
 
-
 def get_model_quota(model_name: str = MODEL_NAME) -> dict:
     quotas = {
         "gemini-1.5-pro": {"rpm": 2, "max_workers": 2, "daily_limit": 50},
         "gemini-1.5-flash": {"rpm": 15, "max_workers": 4, "daily_limit": 1500},
-        "gemini-3.1-flash-lite": {"rpm": 15, "max_workers": 4, "daily_limit": 500},
         "gemini-2.0-flash": {"rpm": 15, "max_workers": 5, "daily_limit": 1500},
     }
     for key, quota in quotas.items():
         if key in model_name:
             return quota
-    return {"rpm": 15, "max_workers": 4, "daily_limit": 500}
-
+    return {"rpm": 15, "max_workers": 4, "daily_limit": 1500}
 
 def build_prompt(role: str, job_description: str, skills: str, reject_threshold: int, shortlist_threshold: int) -> str:
     return (
@@ -68,17 +66,23 @@ def build_prompt(role: str, job_description: str, skills: str, reject_threshold:
         "Return one final ATS decision and score in the specified JSON format."
     )
 
-
 def build_payload(file_path: Path, prompt: str) -> dict:
     parts = []
-
-    # Handle direct inline_data for PDF
-    if file_path.suffix.lower() == ".pdf":
+    ext = file_path.suffix.lower()
+    
+    # 1. Handle PDF
+    if ext == ".pdf":
         file_data = base64.b64encode(file_path.read_bytes()).decode("utf-8")
         parts.append({"inline_data": {"mime_type": "application/pdf", "data": file_data}})
-
-    # Handle text extraction for DOCX/DOC as LLMs require raw text for Word docs via basic API
-    elif file_path.suffix.lower() in [".docx", ".doc"]:
+    
+    # 2. Handle Images natively via Gemini Multimodal capabilities
+    elif ext in [".png", ".jpg", ".jpeg"]:
+        mime_type = "image/png" if ext == ".png" else "image/jpeg"
+        file_data = base64.b64encode(file_path.read_bytes()).decode("utf-8")
+        parts.append({"inline_data": {"mime_type": mime_type, "data": file_data}})
+    
+    # 3. Handle Text Extraction for DOCX
+    elif ext in [".docx", ".doc"]:
         if docx is None:
             raise RuntimeError("python-docx is required. Please install it via requirements.txt")
         try:
@@ -88,20 +92,20 @@ def build_payload(file_path: Path, prompt: str) -> dict:
         except Exception as e:
             raise RuntimeError(f"Failed to read DOCX file {file_path.name}: {str(e)}")
     else:
-        raise RuntimeError(f"Unsupported file format: {file_path.suffix}")
+        raise RuntimeError(f"Unsupported file format: {ext}")
 
+    # Append the prompt to the payload
     parts.append({"text": prompt})
-
+    
     return {
         "contents": [{"parts": parts}],
         "generationConfig": {
-            "temperature": 0,
+            "temperature": 0.1,
             "maxOutputTokens": MAX_OUTPUT_TOKENS,
             "responseMimeType": "application/json",
             "responseSchema": ATS_RESPONSE_SCHEMA
         },
     }
-
 
 def post_json(api_key: str, payload: dict) -> dict:
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent"
@@ -112,7 +116,6 @@ def post_json(api_key: str, payload: dict) -> dict:
     )
     with urllib.request.urlopen(req, timeout=60) as response:
         return json.loads(response.read().decode("utf-8"))
-
 
 def call_gemini(api_key: str, file_path: Path, prompt: str) -> dict:
     import time
@@ -126,6 +129,7 @@ def call_gemini(api_key: str, file_path: Path, prompt: str) -> dict:
         except urllib.error.HTTPError as exc:
             error_body = exc.read().decode('utf-8', errors='replace')
             last_error = f"HTTP {exc.code}: {error_body}"
+            # Handle rate limits (429) or server errors (500+) by backing off and retrying
             if exc.code in {429, 500, 502, 503, 504} and attempt < RETRY_LIMIT:
                 jitter = random.uniform(0.5, 1.5)
                 time.sleep((2 * (attempt + 1)) + jitter)
@@ -139,26 +143,26 @@ def call_gemini(api_key: str, file_path: Path, prompt: str) -> dict:
             raise RuntimeError(last_error) from exc
     raise RuntimeError(last_error)
 
-
 def parse_response(text: str) -> dict:
+    # Ensure robust JSON parsing even if the LLM wraps it in markdown blocks
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
         match = re.search(r"\{.*\}", text, flags=re.DOTALL)
-        if not match: raise
+        if not match: 
+            raise RuntimeError("Could not parse JSON from model response.")
         data = json.loads(match.group(0))
 
     score = float(data.get("ats_score", 0))
     decision = str(data.get("decision", "")).upper()
-
-    # Fallback in case the LLM hallucinates an invalid string
+    
     if decision not in {"SHORTLIST", "REVIEW", "REJECT"}:
         decision = "REVIEW"
 
     return {
-        "candidate_name": str(data.get("candidate_name", "")).strip(),
-        "highest_degree": str(data.get("highest_degree", "")).strip(),
-        "field_of_study": str(data.get("field_of_study", "")).strip(),
+        "candidate_name": str(data.get("candidate_name", "Unknown")).strip(),
+        "highest_degree": str(data.get("highest_degree", "Not Specified")).strip(),
+        "field_of_study": str(data.get("field_of_study", "Not Specified")).strip(),
         "ai_experience_years": float(data.get("ai_experience_years", 0)),
         "matched_skills": data.get("matched_skills", []),
         "missing_skills": data.get("missing_skills", []),
@@ -167,14 +171,13 @@ def parse_response(text: str) -> dict:
         "decision_reason": str(data.get("decision_reason", "")).strip(),
     }
 
-
-def analyze_pdf(api_key: str, file_path: Path, prompt: str) -> dict:
+def analyze_document(api_key: str, file_path: Path, prompt: str) -> dict:
     try:
         data = call_gemini(api_key, file_path, prompt)
         return {"file": file_path.name, "source_path": str(file_path), "error": "", **data}
     except Exception as exc:
         raise RuntimeError(f"Error processing {file_path.name}: {str(exc)}") from exc
 
-
 def chunks(lst: list, n: int):
+    # Yield successive n-sized chunks from list
     return [lst[i:i + n] for i in range(0, len(lst), n)]
