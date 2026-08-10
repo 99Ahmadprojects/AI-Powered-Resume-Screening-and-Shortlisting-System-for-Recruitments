@@ -595,7 +595,7 @@ function AppContent() {
           <div className="flex gap-8">
             <Link to="/blog" className="hover:text-white transition-colors">Blog</Link>
             <Link to="/privacy" className="hover:text-blue-400 transition-colors">Privacy Policy</Link>
-            <a href="https://github.com" target="_blank" rel="noreferrer" className="hover:text-white transition-colors">GitHub Repository</a>
+            <a href="https://github.com/99Ahmadprojects/AI-Powered-Resume-Screening-and-Shortlisting-System-for-Recruitments" target="_blank" rel="noreferrer" className="hover:text-white transition-colors">GitHub Repository</a>
           </div>
         </div>
       </footer>
